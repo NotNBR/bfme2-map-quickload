@@ -5,13 +5,18 @@ DLL in the game folder; it builds the map's terrain textures on all your
 processor cores instead of one, and skips the five seconds the game shows its
 title logo after every load.
 
-| Map (Medium detail) | Unpatched | Patched |
-| --- | --- | --- |
-| Brightwater Fold, 480 x 480 cells | 17.0 s | 4.5 s |
-| The Greywater Marches, 1,350 x 900 cells | about 54 s | 9.3 s |
+![Three maps loading side by side, unpatched and patched, each with a stopwatch](media/loading-comparison.gif)
+
+| Map (Medium detail) | Unpatched | Patched | |
+| --- | --- | --- | --- |
+| The Greywater Marches, 1,350 x 900 cells | 50.5 s | 10.2 s | 5.0x faster |
+| Grey Mountains, 485 x 550 cells | 16.9 s | 6.1 s | 2.8x faster |
+| Harlindon, 500 x 500 cells | 15.4 s | 5.3 s | 2.9x faster |
 
 Seconds from starting a skirmish to its first frame of play, on a 16-thread
-CPU. Bigger maps gain more.
+CPU; the animation plays at 2x speed. Bigger maps gain more. These runs leave
+out the title logo the game shows after loading, so the patch saves another
+five seconds on top of them.
 
 ## Install
 
