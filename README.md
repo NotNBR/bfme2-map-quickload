@@ -5,6 +5,8 @@ DLL in the game folder; it builds the map's terrain textures on all your
 processor cores instead of one, and skips the five seconds the game shows its
 title logo after every load.
 
+> Built with help from [OpenBFME2](https://github.com/Open-BFME/Open-BFME-2).
+
 <img src="media/loading-comparison.gif" width="648" alt="Three maps loading side by side, unpatched and patched, each with a stopwatch">
 
 | Map (Medium detail) | Unpatched | Patched | |
