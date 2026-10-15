@@ -1,6 +1,7 @@
 # bfme2-map-quickload
 
-Faster map loading for *The Battle for Middle-earth II* (version 1.06). One
+Faster map loading for *The Battle for Middle-earth II* (1.06) and the verified
+*Rise of the Witch-king* 2.01 engine. One
 DLL in the game folder; it builds the map's terrain textures on all your
 processor cores instead of one, and skips the five seconds the game shows its
 title logo after every load.
@@ -24,14 +25,15 @@ five seconds on top of them.
 
 1. Download `dinput8.dll` from the [latest release](../../releases/latest)
    (or `bin/dinput8.dll` here).
-2. Copy it into your BFME2 folder, next to `game.dat`.
+2. Copy it into your BFME2 or ROTWK folder, next to `game.dat`.
 
 That's all: start the game as usual. To uninstall, delete `dinput8.dll` from
 the game folder.
 
-- **BFME2 1.06 only.** The DLL checks the game's code before changing
-  anything; in any other version, or any other program, it does nothing but
-  pass DirectInput through to Windows.
+- **BFME2 1.06 and verified ROTWK 2.01.** The DLL checks image size, terrain
+  call sites, import thunks and bindings, plus the view-update hook bytes,
+  before installing. Unrecognized layouts only pass DirectInput through to
+  Windows. A matching version number alone is insufficient; see below.
 - If your game folder already has a `dinput8.dll` (another mod), don't
   replace it: only one can be loaded.
 - The patch changes how fast textures are built, not what the game
@@ -45,7 +47,7 @@ compresses it to DXT1 and builds its mipmaps, one texture after another on the
 main thread (about 85% of the load, 1,156 textures on a 480 x 480 map).
 
 The game imports `DirectInput8Create` from `dinput8.dll` and finds this copy
-before Windows' own, which it forwards to. In `game.dat` 1.06 the DLL also:
+before Windows' own, which it forwards to. In a supported `game.dat` the DLL also:
 
 - redirects the game's two import slots for `D3DXLoadSurfaceFromMemory` and
   `D3DXFilterTexture`. Called from the terrain texture builder
@@ -74,9 +76,41 @@ arguments, returns the number of textures handled) on the main thread when
 the map has loaded, before the first frame; from then on the DLL passes
 everything through. [bfme2-map-studio](https://github.com/NotNBR/bfme2-map-studio)
 does this for its test games, calling it when the new-game pass ends
-(`game.dat` RVA 0x248767). Both builds export `mwLoading`, ten counters:
+(`game.dat` RVA 0x248767 for BFME2), or when ROTWK destroys its completed
+loading screen (RVA 0x225524, after textures were queued). Both builds export `mwLoading`, ten counters:
 installed, active, workers, deferred, copied, synchronous, failed, peak queue,
 last error, flushes.
+
+## ROTWK verification
+
+The verified engine has file version `2.1.2614.37001` and SHA-256
+`5481de75b63e22483660ea8097478faef594f90b9ade7de893e092256ba68a26`.
+Earlier local analysis records scheduling differences in this executable;
+this is not a claim that it is untouched retail or that every 2.01 binary
+has the same layout. Its hooks were located in local disassembly:
+
+| Hook (RVA) | BFME2 1.06 | ROTWK |
+| --- | --- | --- |
+| D3DX load / filter import slots | `7BAA14` / `7BAA18` | `7D0A1C` / `7D0A20` |
+| Terrain call returns | `EF5FC` / `EF622` | `EEFBD` / `EEFE3` |
+| GameLogic pointer (LoadScreen at +120) | `9FE78C` | `9E412C` |
+| View update | `85B36` | `8546A` |
+| Title-logo wait instruction | `23965D` | `245CB1` |
+
+On 15 October 2026, Water Lab at Medium detail in an isolated clean ROTWK
+2.01 asset profile reached logic frame 10 in **23.2 s without the fix,
+11.6 s with loading.dll, and 10.2 s with the standalone build**. All runs
+used the same map and hidden DXVK renderer; the logo was already omitted in
+all three. Each accelerated run handled all 1,260 terrain textures on 15
+workers, with zero failed jobs or first-chance exceptions. These are single
+local runs, not a general performance guarantee. The terrain algorithm and
+D3DX arguments are unchanged. A separate automatic-load test placed
+`dinput8.dll` beside the isolated engine and reached frame 11 in 12.3 seconds,
+again with all 1,260 textures copied and zero failures, verifying the proxy's
+import forwarding too. BFME2 regression tests passed with both DLL builds,
+including the studio camera DLL alongside the launcher build.
+Multiplayer and other ROTWK executables have
+not been verified.
 
 ## Building
 

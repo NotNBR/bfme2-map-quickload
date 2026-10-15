@@ -1,4 +1,4 @@
-// GPL-3.0-only. bfme2-map-quickload: faster map loading for BFME2 1.06
+// GPL-3.0-only. bfme2-map-quickload: faster map loading for BFME2 1.06 / ROTWK 2.01
 // (https://github.com/NotNBR/bfme2-map-quickload).
 //
 // While BFME2 1.06 loads a map, most of the time goes into its terrain
@@ -21,7 +21,8 @@
 // any other caller or texture, the calls go straight to D3DX. That is the
 // launcher build, loading.dll, for tools that load the DLL into the game
 // themselves (bfme2-map-studio's test games: a debugger loads it at the first
-// engine frame and calls mwFlush when the new-game pass ends, RVA 0x248767).
+// engine frame and calls mwFlush when the new-game pass ends, BFME2 RVA
+// 0x248767, or at ROTWK's load-screen destruction, RVA 0x225524).
 //
 // Built with MW_STANDALONE, the same code is dinput8.dll for the normal game
 // (copied into the game folder; the game imports DirectInput8Create from
@@ -47,11 +48,19 @@ extern "C" void *_ReturnAddress(void);
 typedef unsigned char U8;
 typedef unsigned int U32;
 
-// RVAs in game.dat 1.06.
-static const U32 LOAD_SURFACE_SLOT = 0x7BAA14;     // D3DXLoadSurfaceFromMemory
-static const U32 FILTER_TEXTURE_SLOT = 0x7BAA18;   // D3DXFilterTexture
-static const U32 LOAD_RETURN = 0xEF5FC;            // updateFlatDXT1's calls return here
-static const U32 FILTER_RETURN = 0xEF622;
+// Separate engine layouts. ROTWK addresses were checked against the local
+// 2.1.2614.37001 engine (SHA-256 5481de75...ba68a26), then in live skirmishes.
+// Select only when image size, both call sites/thunks and import bindings
+// agree; the standalone build also checks camera-update bytes. A version
+// string alone is not a code fingerprint.
+struct Engine {
+    U32 imageSize, loadSlot, filterSlot, loadReturn, filterReturn, logic, viewUpdate, titleLogo;
+};
+static const Engine engines[] = {
+    {0xADA000, 0x7BAA14, 0x7BAA18, 0xEF5FC, 0xEF622, 0x9FE78C, 0x85B36, 0x23965D},
+    {0xAD3000, 0x7D0A1C, 0x7D0A20, 0xEEFBD, 0xEEFE3, 0x9E412C, 0x8546A, 0x245CB1}
+};
+static const Engine *engine;
 
 struct LoadingState {
     U32 installed, active, workers, deferred, copied, synchronous, failed, peakQueue;
@@ -210,7 +219,7 @@ static void drain() {
 static HRESULT __stdcall loadSurfaceHook(void *dest, const void *destPalette, const RECT *destRect, const void *src,
                                          U32 format, U32 pitch, const void *srcPalette, const RECT *srcRect,
                                          U32 filter, U32 colorKey) {
-    if (deferring() && (U8*)_ReturnAddress() == base + LOAD_RETURN && !destPalette && !destRect && !srcPalette &&
+    if (deferring() && (U8*)_ReturnAddress() == base + engine->loadReturn && !destPalette && !destRect && !srcPalette &&
         srcRect && !pending) {
         U32 desc[8];
         if (SUCCEEDED(((SurfaceDescFn)vt(dest)[12])(dest, desc)) && desc[POOL] == POOL_MANAGED) {
@@ -247,7 +256,7 @@ static HRESULT runNow(Job *job, void *texture) {
 
 static HRESULT __stdcall filterTextureHook(void *texture, const void *palette, U32 level, U32 filter) {
     Job *job = pending;
-    if (!job || (U8*)_ReturnAddress() != base + FILTER_RETURN || palette || level)
+    if (!job || (U8*)_ReturnAddress() != base + engine->filterReturn || palette || level)
         return filterTexture(texture, palette, level, filter);
     pending = 0;
     U32 desc[8], levels = ((LevelCountFn)vt(texture)[13])(texture);
@@ -297,7 +306,7 @@ extern "C" __declspec(dllexport) U32 __cdecl mwFlush() {
 
 #ifdef MW_STANDALONE
 static bool loadingNow() {                  // the game shows its loading screen
-    void *logic = *(void**)(base + 0x9FE78C);                       // TheGameLogic
+    void *logic = *(void**)(base + engine->logic);                  // TheGameLogic
     return logic && *(void**)((U8*)logic + 0x120) != 0;              // its LoadScreen
 }
 static bool deferring() { return mwLoading.active && loadingNow(); }
@@ -331,7 +340,7 @@ static void *hook(U32 rva, void *replacement, const U8 *expected, int length) {
 
 static void skipTitleLogo() {
     static const U8 expected[] = {0x8D, 0xB8, 0x88, 0x13, 0x00, 0x00};    // lea edi, [eax+5000]
-    U8 *at = base + 0x23965D;
+    U8 *at = base + engine->titleLogo;
     DWORD old;
     if (memcmp(at, expected, 6) || !VirtualProtect(at, 6, PAGE_EXECUTE_READWRITE, &old)) return;
     memset(at + 2, 0, 4);
@@ -352,25 +361,51 @@ static bool patchSlot(U32 rva, void *hook, void **original) {
     return true;
 }
 
-// Hook game.dat 1.06; false (and nothing changed) in any other process.
+// Verify a relative CALL to the import thunk, and the thunk's exact IAT slot.
+static bool callsSlot(U32 after, U32 slot, U32 imageSize) {
+    if (after < 5 || after >= imageSize || slot > imageSize - 4) return false;
+    U8 *call = base + after - 5;
+    if (*call != 0xe8) return false;
+    U32 thunk = after + *(U32*)(call + 1);
+    if (thunk > imageSize - 6) return false;
+    U8 *at = base + thunk;
+    return at[0] == 0xff && at[1] == 0x25 && *(U32*)(at + 2) == (U32)(base + slot);
+}
+
+static const Engine *identify(HMODULE d3dx) {
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 || dos->e_lfanew > 0x1000) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != 0x10b) return 0;
+    for (U32 i = 0; i < sizeof(engines)/sizeof(engines[0]); i++) {
+        const Engine *candidate = engines + i;
+        if (nt->OptionalHeader.SizeOfImage != candidate->imageSize ||
+            !callsSlot(candidate->loadReturn, candidate->loadSlot, candidate->imageSize) ||
+            !callsSlot(candidate->filterReturn, candidate->filterSlot, candidate->imageSize)) continue;
+        if (*(void**)(base + candidate->loadSlot) == (void*)GetProcAddress(d3dx, "D3DXLoadSurfaceFromMemory") &&
+            *(void**)(base + candidate->filterSlot) == (void*)GetProcAddress(d3dx, "D3DXFilterTexture"))
+            return candidate;
+    }
+    return 0;
+}
+
+// Hook a recognized engine; false (and nothing changed) in other processes.
 static bool install() {
     if (mwLoading.installed) return true;
     base = (U8*)GetModuleHandleA(0);
     HMODULE d3dx = GetModuleHandleA("d3dx9_27.dll");
     if (base != (U8*)0x400000 || !d3dx) return false;
-    // The slots must point at D3DX (bound, and nothing else hooked them).
-    if (*(void**)(base + LOAD_SURFACE_SLOT) != (void*)GetProcAddress(d3dx, "D3DXLoadSurfaceFromMemory") ||
-        *(void**)(base + FILTER_TEXTURE_SLOT) != (void*)GetProcAddress(d3dx, "D3DXFilterTexture"))
-        return false;
+    engine = identify(d3dx);
+    if (!engine) return false;
 #ifdef MW_STANDALONE
     // Without the end-of-load hook nothing may be deferred: it comes first.
     static const U8 updateBytes[] = {0x81, 0xC1, 0xB4, 0, 0, 0};          // add ecx, 0B4h
-    if (!updateOriginal) updateOriginal = hook(0x85B36, (void*)updateHook, updateBytes, 6);
+    if (!updateOriginal) updateOriginal = hook(engine->viewUpdate, (void*)updateHook, updateBytes, 6);
     if (!updateOriginal) return false;
     skipTitleLogo();
 #endif
-    if (!patchSlot(LOAD_SURFACE_SLOT, (void*)loadSurfaceHook, (void**)&loadSurface) ||
-        !patchSlot(FILTER_TEXTURE_SLOT, (void*)filterTextureHook, (void**)&filterTexture))
+    if (!patchSlot(engine->loadSlot, (void*)loadSurfaceHook, (void**)&loadSurface) ||
+        !patchSlot(engine->filterSlot, (void*)filterTextureHook, (void**)&filterTexture))
         return false;
     mwLoading.installed = mwLoading.active = 1;
     return true;
